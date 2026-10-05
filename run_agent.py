@@ -1268,6 +1268,11 @@ class AIAgent(
         """Record the first guardrail decision that should stop this turn."""
         if decision.should_halt and self._tool_guardrail_halt_decision is None:
             self._tool_guardrail_halt_decision = decision
+        # Track recovery injections so second identical halt cuts the turn.
+        if decision.is_recovery_injection:
+            if not hasattr(self, '_toolguard_recovery_count'):
+                self._toolguard_recovery_count = 0
+            self._toolguard_recovery_count += 1
 
     def _toolguard_controlled_halt_response(self, decision: ToolGuardrailDecision) -> str:
         # Shown to the user as the reply, so no decision codes; the code stays in result["guardrail"].
@@ -1277,6 +1282,10 @@ class AIAgent(
             "blocked it. Tell me how you'd like to proceed, or send `continue` and I'll try a "
             "different approach."
         )
+
+    def _toolguard_recovery_response(self, decision: ToolGuardrailDecision) -> str:
+        """Return the Spanish recovery instruction from the first-halt decision."""
+        return decision.recovery_instruction
 
     def _append_guardrail_observation(self, tool_name: str, function_args: dict, function_result: str, *,
                                       failed: bool, tool_call_id: str = "") -> str:
@@ -1301,6 +1310,10 @@ class AIAgent(
             function_result = append_toolguard_guidance(function_result, decision)
         if decision.should_halt:
             self._set_tool_guardrail_halt(decision)
+        elif decision.is_recovery_injection:
+            # First halt → inject Spanish recovery instruction, continue the turn.
+            self._set_tool_guardrail_halt(decision)
+            function_result = (function_result or "") + "\n\n---\n" + decision.recovery_instruction
         else:
             # observe_call may have raised the identical-call streak or batch-cycle halt (hard_stop_enabled, tool-agnostic).
             streak_halt = self._tool_guardrails.halt_decision

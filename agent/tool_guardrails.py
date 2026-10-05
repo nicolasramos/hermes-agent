@@ -180,20 +180,27 @@ class ToolCallSignature:
 class ToolGuardrailDecision:
     """Decision returned by the tool-call guardrail controller."""
 
-    action: str = "allow"  # allow | warn | block | halt
+    action: str = "allow"  # allow | warn | block | halt | allow_with_recovery_instruction
     code: str = "allow"
     message: str = ""
     tool_name: str = ""
     count: int = 0
     signature: ToolCallSignature | None = None
+    # When action is "allow_with_recovery_instruction", this carries the
+    # Spanish-language recovery instruction to inject into the conversation.
+    recovery_instruction: str = ""
 
     @property
     def allows_execution(self) -> bool:
-        return self.action in {"allow", "warn"}
+        return self.action in {"allow", "warn", "allow_with_recovery_instruction"}
 
     @property
     def should_halt(self) -> bool:
         return self.action in {"block", "halt"}
+
+    @property
+    def is_recovery_injection(self) -> bool:
+        return self.action == "allow_with_recovery_instruction"
 
     def to_metadata(self) -> dict[str, Any]:
         data = asdict(self)
@@ -335,6 +342,8 @@ class ToolCallGuardrailController:
         self._persisted_result_paths: dict[str, str] = {}
         self._turn_web_search_count = 0
         self._turn_subagent_count = 0
+        # First-halt recovery injection tracker (per turn, resets at turn end).
+        self._first_halt_injection_count: int = 0
 
     @property
     def halt_decision(self) -> ToolGuardrailDecision | None:
@@ -350,7 +359,38 @@ class ToolCallGuardrailController:
         decision = ToolGuardrailDecision(action, code, message, tool_name, count, signature)
         if decision.should_halt:
             self._halt_decision = decision
+        # Recovery injection: first halt for this signature in the turn.
+        if action == "allow_with_recovery_instruction":
+            self._first_halt_injection_count += 1
+            if self._first_halt_injection_count <= 1:
+                # First halt → injection, not a stop; still track for replay detection.
+                decision = ToolGuardrailDecision(
+                    action="allow_with_recovery_instruction",
+                    code=code,
+                    message=message,
+                    tool_name=tool_name,
+                    count=count, signature=signature,
+                    recovery_instruction=self._build_recovery_instruction(
+                        tool_name, code, signature
+                    ),
+                )
+                self._halt_decision = decision  # track for replay detection
+            # Second+ halt → hard stop (fall through to should_halt logic).
         return decision
+
+    def _build_recovery_instruction(
+        self, tool_name: str, code: str, signature: ToolCallSignature | None,
+    ) -> str:
+        """Build a Spanish-language recovery instruction for the first halt."""
+        sig_preview = ""
+        if signature:
+            sig_preview = f" (args_hash={signature.args_hash[:12]}…)"
+        return (
+            f"[hermes: la llamada a `{tool_name}{sig_preview}` ha devuelto el mismo resultado "
+            f"consecutivas sin progreso. "
+            "Cambia de estrategia: usa otro tool, otros argumentos, o recapitula con lo que ya tienes "
+            "y responde al usuario.]"
+        )
 
     def before_call(self, tool_name: str, args: Mapping[str, Any] | None) -> ToolGuardrailDecision:
         args = _coerce_args(args)
@@ -364,10 +404,10 @@ class ToolCallGuardrailController:
         # A mutation since this call last failed makes the retry a new experiment.
         exact_count = 0 if self._progress_since_failure.get(signature) else self._exact_failure_counts.get(signature, 0)
         if exact_count >= self.config.exact_failure_block_after:
-            return self._decide("block", "repeated_exact_failure_block", tool_name, exact_count, signature)
+            return self._decide("allow_with_recovery_instruction", "repeated_exact_failure_block", tool_name, exact_count, signature)
         record = self._no_progress.get(signature) if self._is_idempotent(tool_name) else None
         if record is not None and record[1] >= self.config.no_progress_block_after:
-            return self._decide("block", "idempotent_no_progress_block", tool_name, record[1], signature)
+            return self._decide("allow_with_recovery_instruction", "idempotent_no_progress_block", tool_name, record[1], signature)
         return allow
 
     def after_call(
@@ -401,7 +441,7 @@ class ToolCallGuardrailController:
                 and tool_name not in FAILURE_TOLERANT_TOOL_NAMES
                 and same_count >= self.config.same_tool_failure_halt_after
             ):
-                return self._decide("halt", "same_tool_failure_halt", tool_name, same_count, signature)
+                return self._decide("allow_with_recovery_instruction", "same_tool_failure_halt", tool_name, same_count, signature)
             if warnings and exact_count >= self.config.exact_failure_warn_after:
                 return self._decide("warn", "repeated_exact_failure_warning", tool_name, exact_count, signature)
             if warnings and same_count >= self.config.same_tool_failure_warn_after:
@@ -465,7 +505,7 @@ class ToolCallGuardrailController:
             # is tool-agnostic, so with hard stops on, halt at the same threshold (a model
             # replaying a successful `terminal` call otherwise runs to the budget).
             if self.config.hard_stop_enabled and count >= self.config.no_progress_block_after and self._halt_decision is None:
-                self._decide("halt", "identical_call_streak_halt", tool_name, count, signature)
+                self._decide("allow_with_recovery_instruction", "identical_call_streak_halt", tool_name, count, signature)
 
         # Batch-cycle detection (oh-my-pi#10521): a repeating multi-call cycle resets the
         # consecutive streak on every alternation, so check the call history for a period-p lap.
@@ -479,7 +519,7 @@ class ToolCallGuardrailController:
                 period, laps = cycle
                 notice = _IDENTICAL_CYCLE_NOTICE.format(count=laps, period=period, tool_name=tool_name)
                 if self.config.hard_stop_enabled and laps >= self.config.no_progress_block_after and self._halt_decision is None:
-                    self._decide("halt", "identical_cycle_halt", tool_name, laps, signature, period=period)
+                    self._decide("allow_with_recovery_instruction", "identical_cycle_halt", tool_name, laps, signature, period=period)
 
         stub = None
         if is_plain_str and count >= 2 and not failed and len(result) >= IDENTICAL_RESULT_STUB_MIN_CHARS:

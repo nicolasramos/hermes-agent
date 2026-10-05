@@ -164,17 +164,30 @@ def run_tool_round(
     if agent._tool_guardrail_halt_decision is not None:
         decision = agent._tool_guardrail_halt_decision
         _turn_exit_reason = "guardrail_halt"
-        final_response = agent._toolguard_controlled_halt_response(decision)
-        agent._emit_diagnostic_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
-        append_message(messages, {"role": "assistant", "content": final_response})
-        # Emit the halt so it isn't mistaken for a crash; the stream callback is still
-        # alive, so SSE/TUI clients see the explanation.
-        if final_response:
-            agent._safe_print(f"\n{final_response}\n")
-            if agent.stream_delta_callback:
-                with suppress(Exception):
-                    agent.stream_delta_callback(final_response)
-                    agent.stream_delta_callback(None)
+        # Second+ recovery attempt → hard cut with the template.
+        if decision.is_recovery_injection and getattr(agent, '_toolguard_recovery_count', 0) >= 1:
+            final_response = agent._toolguard_controlled_halt_response(decision)
+            agent._emit_diagnostic_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
+            append_message(messages, {"role": "assistant", "content": final_response})
+            if final_response:
+                agent._safe_print(f"\n{final_response}\n")
+                if agent.stream_delta_callback:
+                    with suppress(Exception):
+                        agent.stream_delta_callback(final_response)
+            agent.stream_delta_callback(None)
+        else:
+            # First recovery injection → inject Spanish instruction, continue the turn.
+            final_response = agent._toolguard_recovery_response(decision)
+            agent._emit_diagnostic_status(f"🔁 Tool guardrail recovery injected: {decision.tool_name}: {decision.code}")
+            append_message(messages, {"role": "assistant", "content": final_response})
+            if final_response:
+                agent._safe_print(f"\n{final_response}\n")
+                if agent.stream_delta_callback:
+                    with suppress(Exception):
+                        agent.stream_delta_callback(final_response)
+            agent.stream_delta_callback(None)
+            return _verdict("continue")
+
         return _verdict("break")
 
     # Reset per-turn retry counters so one truncation can't poison the turn.
