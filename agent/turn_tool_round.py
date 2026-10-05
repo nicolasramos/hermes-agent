@@ -39,6 +39,7 @@ class ToolRoundVerdict:
     failed: Any
     _turn_exit_reason: Any
     truncated_tool_call_retries: Any
+    current_turn_user_idx: Any
     result: Optional[Dict[str, Any]] = None
 
 
@@ -47,7 +48,7 @@ def run_tool_round(
     conversation_history: Any, api_call_count: Any, effective_task_id: Any, user_message: Any,
     system_message: Any, active_system_prompt: Any, compression_attempts: Any,
     max_compression_attempts: Any, final_response: Any, failed: Any, _turn_exit_reason: Any,
-    truncated_tool_call_retries: Any,
+    truncated_tool_call_retries: Any, current_turn_user_idx: Any,
 ) -> ToolRoundVerdict:
     """Execute one tool round in the exact original order. Persist-before-execute is a
     durability invariant: resume must see the executed block if a destructive tool restarts
@@ -60,7 +61,8 @@ def run_tool_round(
             action=action, messages=messages, conversation_history=conversation_history,
             active_system_prompt=active_system_prompt, compression_attempts=compression_attempts,
             final_response=final_response, failed=failed, _turn_exit_reason=_turn_exit_reason,
-            truncated_tool_call_retries=truncated_tool_call_retries, result=result,
+            truncated_tool_call_retries=truncated_tool_call_retries,
+            current_turn_user_idx=current_turn_user_idx, result=result,
         )
 
     if not agent.quiet_mode:
@@ -162,17 +164,30 @@ def run_tool_round(
     if agent._tool_guardrail_halt_decision is not None:
         decision = agent._tool_guardrail_halt_decision
         _turn_exit_reason = "guardrail_halt"
-        final_response = agent._toolguard_controlled_halt_response(decision)
-        agent._emit_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
-        append_message(messages, {"role": "assistant", "content": final_response})
-        # Emit the halt so it isn't mistaken for a crash; the stream callback is still
-        # alive, so SSE/TUI clients see the explanation.
-        if final_response:
-            agent._safe_print(f"\n{final_response}\n")
-            if agent.stream_delta_callback:
-                with suppress(Exception):
-                    agent.stream_delta_callback(final_response)
-                    agent.stream_delta_callback(None)
+        # Second+ recovery attempt → hard cut with the template.
+        if decision.is_recovery_injection and getattr(agent, '_toolguard_recovery_count', 0) >= 1:
+            final_response = agent._toolguard_controlled_halt_response(decision)
+            agent._emit_diagnostic_status(f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}")
+            append_message(messages, {"role": "assistant", "content": final_response})
+            if final_response:
+                agent._safe_print(f"\n{final_response}\n")
+                if agent.stream_delta_callback:
+                    with suppress(Exception):
+                        agent.stream_delta_callback(final_response)
+            agent.stream_delta_callback(None)
+        else:
+            # First recovery injection → inject Spanish instruction, continue the turn.
+            final_response = agent._toolguard_recovery_response(decision)
+            agent._emit_diagnostic_status(f"🔁 Tool guardrail recovery injected: {decision.tool_name}: {decision.code}")
+            append_message(messages, {"role": "assistant", "content": final_response})
+            if final_response:
+                agent._safe_print(f"\n{final_response}\n")
+                if agent.stream_delta_callback:
+                    with suppress(Exception):
+                        agent.stream_delta_callback(final_response)
+            agent.stream_delta_callback(None)
+            return _verdict("continue")
+
         return _verdict("break")
 
     # Reset per-turn retry counters so one truncation can't poison the turn.
@@ -191,6 +206,7 @@ def run_tool_round(
         compression_attempts=compression_attempts,
         max_compression_attempts=max_compression_attempts, effective_task_id=effective_task_id,
         final_response=final_response, turn_exit_reason=_turn_exit_reason,
+        current_turn_user_idx=current_turn_user_idx,
     )
     messages = _ptc.messages
     active_system_prompt = _ptc.active_system_prompt
@@ -198,6 +214,7 @@ def run_tool_round(
     compression_attempts = _ptc.compression_attempts
     final_response = _ptc.final_response
     _turn_exit_reason = _ptc.turn_exit_reason
+    current_turn_user_idx = _ptc.current_turn_user_idx
     if _ptc.end_turn:
         return _verdict("break")
 
