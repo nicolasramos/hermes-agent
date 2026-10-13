@@ -512,17 +512,14 @@ class BotCreate(BaseModel):
     name: str
     title: Optional[str] = None
     description: str = ""
-    soul: str = ""
-    model: Optional[str] = None  # e.g. "openai/gpt-4o"
-    provider: Optional[str] = None  # e.g. "openai"
+    model: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class BotUpdate(BaseModel):
     """PUT /api/bots/{name} — update an existing bot."""
     title: Optional[str] = None
     description: Optional[str] = None
-    soul: Optional[str] = None
     model: Optional[str] = None
     provider: Optional[str] = None
-    active: Optional[bool] = None
 

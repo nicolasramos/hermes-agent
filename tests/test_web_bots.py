@@ -1,429 +1,195 @@
-"""Tests for the Bot Mode dashboard API (web_routers/bots.py).
+"""Real (non-mocked) tests for the Bot Mode dashboard API.
 
-Verifies:
-- GET /api/bots  — list bots with metadata
-- POST /api/bots/{name} — create a bot (profile + ui_meta + session)
-- PUT /api/bots/{name} — update bot metadata
-- DELETE /api/bots/{name} — unmark from Bot Mode
+Covers the acceptance criteria of NRA-4435:
+  1. the roster walks the profiles of the *test* HOME and reports a non-empty
+     bot title for a marked profile;
+  2. creating a bot leaves the three things — the profile on disk,
+     ``ui_meta['hermes-bots']`` inside ``profile.yaml``, and a session whose title
+     is exactly ``Bot Chat`` (read back from the profile's own session store);
+  3. repeating the creation with the same name fails without side effects;
+  4. the roster test is not vacuous (it fails when the ui_meta write is skipped).
 
-Non-vacuity proof: reverting the ``ui_meta`` write must make the roster
-test fail.
+``tests/conftest.py`` already points ``HERMES_HOME`` at a per-test tmpdir, so these
+tests create real profiles and real session rows there.
 """
 
-import datetime
-import os
-import sys
+import asyncio
 from pathlib import Path
-from unittest import mock
 
 import pytest
+import yaml
+from fastapi import HTTPException
 
-# Ensure the project root is on sys.path for imports
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+import hermes_cli.web_routers.bots as bots
+from hermes_cli import profiles as profiles_mod
+from hermes_cli.web_models import BotCreate, BotUpdate
 
-
-# ── Fixtures ───────────────────────────────────────────────────────────────
-
-@pytest.fixture
-def sample_profiles():
-    """Return a list of ProfileInfo objects for testing."""
-    from hermes_cli.profiles import ProfileInfo
-    from pathlib import Path
-
-    return [
-        ProfileInfo(
-            name="weather-bot",
-            path=Path("/tmp/hermes/profiles/weather-bot"),
-            is_default=False,
-            gateway_running=False,
-        ),
-        ProfileInfo(
-            name="regular-user",
-            path=Path("/tmp/hermes/profiles/regular-user"),
-            is_default=False,
-            gateway_running=False,
-        ),
-    ]
+BOT_CHAT_TITLE = "Bot Chat"
 
 
-@pytest.fixture
-def mock_bot_meta(monkeypatch):
-    """Mock bot_mode_probe helpers to return controlled data."""
-    import hermes_cli.web_routers.bots as bots_mod
+# ── Helpers ────────────────────────────────────────────────────────────────
 
-    monkeypatch.setattr(
-        bots_mod,
-        "is_bot_managed",
-        lambda name: name == "weather-bot",
+
+def _call(coro):
+    """Run one async endpoint to completion."""
+    return asyncio.run(coro)
+
+
+def _make_profile(name: str) -> Path:
+    """Create a real profile inside the test HOME."""
+    return Path(profiles_mod.create_profile(name, no_alias=True, no_skills=True))
+
+
+def _mark_bot(profile_dir: Path, title: str, **extra) -> None:
+    """Write ``ui_meta['hermes-bots']`` the way a bot profile carries it."""
+    data = bots._read_profile_yaml(profile_dir) or {}
+    data.setdefault("ui_meta", {})["hermes-bots"] = {"title": title, **extra}
+    (profile_dir / "profile.yaml").write_text(yaml.dump(data), encoding="utf-8")
+
+
+def _bot_chat_rows(name: str):
+    """Every session of *name*'s own store titled exactly ``Bot Chat``."""
+    from hermes_cli.web_server_sessions import _open_session_db_for_profile
+
+    db = _open_session_db_for_profile(name, read_only=True)
+    try:
+        rows = db.list_sessions_rich(include_hidden=True, include_children=True, limit=200)
+    finally:
+        db.close()
+    return [row for row in rows if (row.get("title") or "") == BOT_CHAT_TITLE]
+
+
+def _entry(roster: dict, name: str) -> dict:
+    return next(b for b in roster["bots"] if b["name"] == name)
+
+
+# ── 1. roster ──────────────────────────────────────────────────────────────
+
+
+def test_roster_lists_every_profile_of_the_test_home():
+    """The roster returns the real profiles of the test HOME, marked and unmarked."""
+    marked_dir = _make_profile("weather-bot")
+    _make_profile("regular-user")
+    _mark_bot(marked_dir, "Weather Assistant", model="qwen3.6-35b")
+
+    roster = _call(bots.list_bots())
+    names = [b["name"] for b in roster["bots"]]
+    assert "weather-bot" in names
+    assert "regular-user" in names
+
+    marked = _entry(roster, "weather-bot")
+    assert marked["bot_managed"] is True
+    assert marked["title"] == "Weather Assistant"  # non-empty bot title
+    assert marked["model"] == "qwen3.6-35b"
+
+    plain = _entry(roster, "regular-user")
+    assert plain["bot_managed"] is False
+    assert plain["title"] is None
+
+
+def test_roster_gives_each_bot_its_canonical_bot_chat_session():
+    """Walking the roster finds or creates the bot's ``Bot Chat`` session."""
+    marked_dir = _make_profile("dm-bot")
+    _mark_bot(marked_dir, "DM Bot")
+    assert _bot_chat_rows("dm-bot") == []
+
+    first = _entry(_call(bots.list_bots()), "dm-bot")
+    session_id = first["bot_chat_session_id"]
+    assert session_id, "the roster must hand out a Bot Chat session id"
+
+    rows = _bot_chat_rows("dm-bot")
+    assert [row["id"] for row in rows] == [session_id]
+    assert rows[0]["title"] == BOT_CHAT_TITLE
+
+    # A second walk reuses the same canonical session instead of making a new one.
+    again = _entry(_call(bots.list_bots()), "dm-bot")
+    assert again["bot_chat_session_id"] == session_id
+    assert len(_bot_chat_rows("dm-bot")) == 1
+
+
+# ── 2. creation ────────────────────────────────────────────────────────────
+
+
+def test_create_bot_leaves_profile_ui_meta_and_bot_chat():
+    """POST /api/bots creates the profile, the ui_meta mark and the Bot Chat."""
+    result = _call(
+        bots.create_bot(
+            BotCreate(
+                name="helper-bot",
+                title="Helper",
+                description="Answers questions",
+                model="qwen3.6-35b",
+            )
+        )
     )
-    monkeypatch.setattr(
-        bots_mod,
-        "bot_title",
-        lambda name: "Weather Assistant" if name == "weather-bot" else None,
+    assert result["ok"] is True
+
+    profile_dir = Path(profiles_mod.get_profile_dir("helper-bot"))
+    assert profile_dir.is_dir()
+
+    data = yaml.safe_load((profile_dir / "profile.yaml").read_text(encoding="utf-8"))
+    block = data["ui_meta"]["hermes-bots"]
+    assert block["title"] == "Helper"
+    assert block["description"] == "Answers questions"
+    assert block["model"] == "qwen3.6-35b"
+
+    rows = _bot_chat_rows("helper-bot")
+    assert len(rows) == 1, "exactly one canonical Bot Chat session"
+    assert rows[0]["title"] == BOT_CHAT_TITLE
+    assert rows[0]["id"] == result["bot_chat_session_id"]
+
+
+def test_create_bot_rejects_a_duplicate_without_side_effects():
+    """A second POST with the same name fails and creates nothing new."""
+    _call(bots.create_bot(BotCreate(name="dup-bot", title="Dup")))
+
+    with pytest.raises(HTTPException) as excinfo:
+        _call(bots.create_bot(BotCreate(name="dup-bot", title="Dup again")))
+    assert excinfo.value.status_code == 409
+
+    profile_dir = Path(profiles_mod.get_profile_dir("dup-bot"))
+    data = yaml.safe_load((profile_dir / "profile.yaml").read_text(encoding="utf-8"))
+    assert data["ui_meta"]["hermes-bots"]["title"] == "Dup"
+    assert len(_bot_chat_rows("dup-bot")) == 1
+
+
+# ── 3. detail / update / unmark ────────────────────────────────────────────
+
+
+def test_detail_update_and_unmark_round_trip():
+    _call(bots.create_bot(BotCreate(name="lifecycle-bot", title="First")))
+
+    detail = _call(bots.get_bot_detail("lifecycle-bot"))
+    assert detail["bot_managed"] is True
+    assert detail["title"] == "First"
+
+    updated = _call(bots.update_bot("lifecycle-bot", BotUpdate(title="Second", model="m2")))
+    assert updated["ok"] is True
+    assert updated["bot"]["title"] == "Second"
+    assert updated["bot"]["model"] == "m2"
+
+    _call(bots.delete_bot("lifecycle-bot"))
+    assert _entry(_call(bots.list_bots()), "lifecycle-bot")["bot_managed"] is False
+    with pytest.raises(HTTPException) as excinfo:
+        _call(bots.get_bot_detail("lifecycle-bot"))
+    assert excinfo.value.status_code == 404
+
+
+# ── 4. non-vacuity ─────────────────────────────────────────────────────────
+
+
+def test_roster_is_not_vacuous(monkeypatch):
+    """Skip the ui_meta write and the roster must stop reporting the bot.
+
+    This is the in-suite half of the non-vacuity proof: if ``create_bot`` did not
+    write ``ui_meta['hermes-bots']``, ``bot_managed`` could not flip to True.
+    """
+    monkeypatch.setattr(bots, "_write_bots_meta", lambda profile_dir, block: None)
+
+    _call(bots.create_bot(BotCreate(name="unwritten-bot", title="Never written")))
+
+    entry = _entry(_call(bots.list_bots()), "unwritten-bot")
+    assert entry["bot_managed"] is False, (
+        "without the ui_meta write the profile must NOT be reported as a bot — "
+        "otherwise the roster assertions above are vacuous"
     )
-    return bots_mod
-
-
-# ── Tests: GET /api/bots ───────────────────────────────────────────────────
-
-class TestListBots:
-    """Tests for the GET /api/bots endpoint."""
-
-    def test_list_bots_returns_list(self, sample_profiles, mock_bot_meta):
-        """GET /api/bots should return a dict with a 'bots' key."""
-        from hermes_cli.web_routers.bots import list_bots
-
-        with mock.patch.object(
-            mock_bot_meta,
-            "_bot_managed",
-            return_value=False,
-        ):
-            result = mock_bot_meta.list_bots()
-
-        assert isinstance(result, dict)
-        assert "bots" in result
-        assert isinstance(result["bots"], list)
-
-    def test_list_bots_augments_with_bot_meta(
-        self, sample_profiles, mock_bot_meta
-    ):
-        """GET /api/bots should add bot_title and bot_managed to each entry."""
-        result = mock_bot_meta.list_bots()
-        bots = result["bots"]
-
-        # Both profiles should be in the list
-        names = [b["name"] for b in bots]
-        assert "weather-bot" in names
-        assert "regular-user" in names
-
-        # The bot-managed profile should have bot metadata
-        weather = next(b for b in bots if b["name"] == "weather-bot")
-        assert weather.get("bot_managed") is True
-        assert weather.get("bot_title") == "Weather Assistant"
-
-        # The regular profile should NOT have bot metadata
-        regular = next(b for b in bots if b["name"] == "regular-user")
-        assert regular.get("bot_managed") is False
-        assert regular.get("bot_title") is None
-
-    def test_list_bots_empty_when_no_profiles(self, mock_bot_meta):
-        """GET /api/bots should return empty list when no profiles exist."""
-        with mock.patch.object(mock_bot_meta, "list_profiles_for_ui", return_value=[]):
-            result = mock_bot_meta.list_bots()
-
-        assert result["bots"] == []
-
-
-# ── Tests: POST /api/bots/{name} ──────────────────────────────────────────
-
-class TestCreateBot:
-    """Tests for the POST /api/bots/{name} endpoint."""
-
-    def test_create_bot_creates_profile_and_meta(self, tmp_path, monkeypatch):
-        """POST should create the profile dir, profile.yaml, and ui_meta."""
-        from hermes_cli.web_routers.bots import create_bot
-
-        bot_name = "test-bot"
-        profile_dir = tmp_path / "profiles" / bot_name
-        profile_dir.mkdir(parents=True)
-
-        # Mock _resolve_profile_dir to return our temp dir
-        with mock.patch(
-            "hermes_cli.web_routers.bots._resolve_profile_dir",
-            return_value=str(profile_dir),
-        ):
-            result = create_bot(bot_name)
-
-        # Verify profile.yaml was created
-        profile_yaml = profile_dir / "profile.yaml"
-        assert profile_yaml.exists()
-
-        # Verify ui_meta was written with hermes-bots mark
-        import yaml
-        content = yaml.safe_load(profile_yaml.read_text())
-        assert "ui_meta" in content
-        assert "hermes-bots" in content["ui_meta"]
-        assert content["ui_meta"]["hermes-bots"]["title"] == bot_name
-
-    def test_create_bot_returns_409_if_profile_exists(self, tmp_path, monkeypatch):
-        """POST should return 409 Conflict when profile already exists."""
-        from hermes_cli.web_routers.bots import create_bot
-
-        bot_name = "existing-bot"
-        profile_dir = tmp_path / "profiles" / bot_name
-        profile_dir.mkdir(parents=True)
-
-        # Create a dummy profile.yaml to simulate existing profile
-        (profile_dir / "profile.yaml").write_text("name: " + bot_name)
-
-        with mock.patch(
-            "hermes_cli.web_routers.bots._resolve_profile_dir",
-            return_value=str(profile_dir),
-        ):
-            with pytest.raises(Exception) as exc_info:  # HTTPException
-                create_bot(bot_name)
-
-        assert "409" in str(exc_info.value) or "Conflict" in str(exc_info.value)
-
-
-# ── Tests: PUT /api/bots/{name} ───────────────────────────────────────────
-
-class TestUpdateBot:
-    """Tests for the PUT /api/bots/{name} endpoint."""
-
-    def test_update_bot_updates_ui_meta(self, tmp_path, monkeypatch):
-        """PUT should update the bot metadata in ui_meta."""
-        from hermes_cli.web_routers.bots import update_bot
-
-        bot_name = "test-bot"
-        profile_dir = tmp_path / "profiles" / bot_name
-        profile_dir.mkdir(parents=True)
-
-        # Create initial profile.yaml with existing ui_meta
-        import yaml
-        profile_data = {
-            "name": bot_name,
-            "ui_meta": {
-                "hermes-bots": {"title": bot_name, "model": "old-model"}
-            },
-        }
-        (profile_dir / "profile.yaml").write_text(yaml.dump(profile_data))
-
-        # Mock _resolve_profile_dir to return our temp dir
-        with mock.patch(
-            "hermes_cli.web_routers.bots._resolve_profile_dir",
-            return_value=str(profile_dir),
-        ):
-            result = update_bot(
-                bot_name,
-                body=mock_bot_meta.BotUpdate(
-                    model="new-model", active=True
-                ),
-            )
-
-        # Verify ui_meta was updated
-        content = yaml.safe_load(
-            (profile_dir / "profile.yaml").read_text()
-        )
-        assert content["ui_meta"]["hermes-bots"]["model"] == "new-model"
-        assert content["ui_meta"]["hermes-bots"]["active"] is True
-
-
-# ── Tests: DELETE /api/bots/{name} ────────────────────────────────────────
-
-class TestDeleteBot:
-    """Tests for the DELETE /api/bots/{name} endpoint."""
-
-    def test_delete_bot_removes_hermes_bots_meta(self, tmp_path, monkeypatch):
-        """DELETE should remove the hermes-bots entry from ui_meta."""
-        from hermes_cli.web_routers.bots import delete_bot
-
-        bot_name = "test-bot"
-        profile_dir = tmp_path / "profiles" / bot_name
-        profile_dir.mkdir(parents=True)
-
-        # Create profile.yaml with existing ui_meta
-        import yaml
-        profile_data = {
-            "name": bot_name,
-            "ui_meta": {
-                "hermes-bots": {"title": bot_name, "model": "test-model"}
-            },
-        }
-        (profile_dir / "profile.yaml").write_text(yaml.dump(profile_data))
-
-        with mock.patch(
-            "hermes_cli.web_routers.bots._resolve_profile_dir",
-            return_value=str(profile_dir),
-        ):
-            result = delete_bot(bot_name)
-
-        # Verify hermes-bots was removed from ui_meta
-        content = yaml.safe_load(
-            (profile_dir / "profile.yaml").read_text()
-        )
-        assert "hermes-bots" not in content.get("ui_meta", {})
-
-
-# ── Non-vacuity proof ─────────────────────────────────────────────────────
-
-class TestNonVacuity:
-    """Prove the roster test is not vacuous by reverting ui_meta writing."""
-
-    def test_roster_fails_without_ui_meta_write(self, tmp_path, monkeypatch):
-        """Revert ui_meta writing and show the test fails.
-
-        This is the non-vacuity proof: if we remove the code that writes
-        ``ui_meta['hermes-bots']``, the roster test should not find the bot.
-        """
-        import hermes_cli.web_routers.bots as bots_mod
-
-        bot_name = "test-bot"
-        profile_dir = tmp_path / "profiles" / bot_name
-        profile_dir.mkdir(parents=True)
-
-        # Create profile.yaml WITHOUT hermes-bots mark
-        import yaml
-        profile_data = {
-            "name": bot_name,
-            "description": "A test bot without the mark",
-        }
-        (profile_dir / "profile.yaml").write_text(yaml.dump(profile_data))
-
-        # Mock the functions to simulate NO ui_meta written
-        with mock.patch(
-            "hermes_cli.web_routers.bots._resolve_profile_dir",
-            return_value=str(profile_dir),
-        ):
-            with mock.patch.object(
-                bots_mod, "is_bot_managed", return_value=False
-            ):
-                with mock.patch.object(
-                    bots_mod, "bot_title", return_value=None
-                ):
-                    result = bots_mod.list_bots()
-
-        # The bot should NOT appear in the bot list because it has no mark
-        bots = result["bots"]
-        bot_entries = [b for b in bots if b.get("bot_managed")]
-        assert len(bot_entries) == 0, (
-            "Without ui_meta writing, the bot should not appear in the "
-            "roster — proving the test is NOT vacuous."
-        )
-
-    def test_roster_succeeds_with_ui_meta_write(self, tmp_path, monkeypatch):
-        """With ui_meta written, the bot SHOULD appear in the roster."""
-        import hermes_cli.web_routers.bots as bots_mod
-
-        bot_name = "test-bot"
-        profile_dir = tmp_path / "profiles" / bot_name
-        profile_dir.mkdir(parents=True)
-
-        # Create profile.yaml WITH hermes-bots mark (simulating create_bot output)
-        import yaml
-        profile_data = {
-            "name": bot_name,
-            "ui_meta": {
-                "hermes-bots": {"title": bot_name, "model": "test-model"}
-            },
-        }
-        (profile_dir / "profile.yaml").write_text(yaml.dump(profile_data))
-
-        # Mock the functions to simulate ui_meta IS written
-        with mock.patch(
-            "hermes_cli.web_routers.bots._resolve_profile_dir",
-            return_value=str(profile_dir),
-        ):
-            with mock.patch.object(
-                bots_mod, "is_bot_managed", return_value=True
-            ):
-                with mock.patch.object(
-                    bots_mod, "bot_title", return_value=bot_name
-                ):
-                    result = bots_mod.list_bots()
-
-        # The bot SHOULD appear in the bot list because it has the mark
-        bots = result["bots"]
-        bot_entries = [b for b in bots if b.get("bot_managed")]
-        assert len(bot_entries) == 1, (
-            "With ui_meta written, the bot should appear in the roster."
-        )
-        assert bot_entries[0]["name"] == bot_name
-
-
-# ── Helper tests ───────────────────────────────────────────────────────────
-
-class TestHelpers:
-    """Tests for internal helper functions."""
-
-    def test_bot_title_returns_none_when_no_mark(self, tmp_path, monkeypatch):
-        """bot_title should return None when profile has no hermes-bots mark."""
-        from hermes_cli.web_routers.bots import bot_title
-
-        profile_dir = tmp_path / "profiles" / "no-mark-bot"
-        profile_dir.mkdir(parents=True)
-
-        import yaml
-        (profile_dir / "profile.yaml").write_text(
-            yaml.dump({"name": "no-mark-bot"})
-        )
-
-        with mock.patch(
-            "hermes_cli.web_routers.bots._bots_meta", return_value={}
-        ):
-            result = bot_title("no-mark-bot")
-
-        assert result is None
-
-    def test_bot_title_returns_title_when_marked(self, tmp_path, monkeypatch):
-        """bot_title should return the title when profile has the mark."""
-        from hermes_cli.web_routers.bots import bot_title
-
-        with mock.patch(
-            "hermes_cli.web_routers.bots._bots_meta",
-            return_value={"title": "My Bot Title"},
-        ):
-            result = bot_title("any-bot")
-
-        assert result == "My Bot Title"
-
-
-# ── Integration-style test ────────────────────────────────────────────────
-
-class TestIntegration:
-    """Light integration test: end-to-end flow through the router."""
-
-    def test_full_bot_lifecycle(self, tmp_path, monkeypatch):
-        """Create → read → update → delete a bot."""
-        import hermes_cli.web_routers.bots as bots_mod
-
-        bot_name = "lifecycle-bot"
-        profile_dir = tmp_path / "profiles" / bot_name
-        profile_dir.mkdir(parents=True)
-
-        with mock.patch(
-            "hermes_cli.web_routers.bots._resolve_profile_dir",
-            return_value=str(profile_dir),
-        ):
-            # 1. Create bot (simulated: we write the profile ourselves)
-            import yaml
-            profile_data = {
-                "name": bot_name,
-                "ui_meta": {
-                    "hermes-bots": {"title": bot_name, "model": "gpt-4"}
-                },
-            }
-            (profile_dir / "profile.yaml").write_text(yaml.dump(profile_data))
-
-            # 2. List bots — should find our bot
-            with mock.patch.object(
-                bots_mod, "is_bot_managed", return_value=True
-            ):
-                with mock.patch.object(
-                    bots_mod, "bot_title", return_value=bot_name
-                ):
-                    result = bots_mod.list_bots()
-
-            assert len(result["bots"]) == 1
-            assert result["bots"][0]["bot_managed"] is True
-
-            # 3. Update bot
-            update_result = bots_mod.update_bot(
-                bot_name,
-                body=bots_mod.BotUpdate(model="gpt-5"),
-            )
-
-            content = yaml.safe_load(
-                (profile_dir / "profile.yaml").read_text()
-            )
-            assert content["ui_meta"]["hermes-bots"]["model"] == "gpt-5"
-
-            # 4. Delete bot
-            delete_result = bots_mod.delete_bot(bot_name)
-
-            content = yaml.safe_load(
-                (profile_dir / "profile.yaml").read_text()
-            )
-            assert "hermes-bots" not in content.get("ui_meta", {})
