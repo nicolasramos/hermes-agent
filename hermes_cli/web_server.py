@@ -913,6 +913,7 @@ def _get_dashboard_plugins(force_rescan: bool = False) -> list:
 # Router mounting. ORDER IS ROUTE-MATCHING ORDER: literal paths must land before
 # templated siblings (e.g. /api/sessions/bulk-delete before /api/sessions/{id}).
 from hermes_cli.web_routers import (  # noqa: E402
+    bots as _bots_routes,
     files as _files_routes,
     git as _git_routes,
     local_models as _local_models_routes,
@@ -959,6 +960,7 @@ app.include_router(_mcp_routes.router)
 app.include_router(_ops_routes.router)
 app.include_router(_skills_routes.hub_router)
 app.include_router(_profiles_routes.router)
+app.include_router(_bots_routes.router)
 app.include_router(_skills_routes.router)
 app.include_router(_tools_routes.router)
 app.include_router(_analytics_routes.router)

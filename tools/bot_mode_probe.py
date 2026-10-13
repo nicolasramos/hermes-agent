@@ -343,6 +343,25 @@ def stored_bot_chat_prompt_needs_upgrade(stored_prompt: str, home: str | os.Path
     return _swallow(lambda: bool(get_bot_mode_protocol_section(home)), False)
 
 
+def bot_title(name: str) -> Optional[str]:
+    """Return the bot title for a managed profile, or None when not marked.
+
+    Reads ``ui_meta['hermes-bots'].title`` from *name*'s profile.yaml via
+    ``_bots_meta``; never raises — returns None on any error.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        resolved = os.path.join(get_hermes_home(), "profiles", name, "profile.yaml")
+        if not os.path.isfile(resolved):
+            return None
+        meta = _bots_meta(name)
+        if meta is None:
+            return None
+        return meta.get("title")
+    except Exception:
+        return None
+
+
 def _reset_cache_for_tests() -> None:
     with _lock:
         _cached.clear()
