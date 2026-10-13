@@ -12,6 +12,7 @@ function compilerPreset() {
   return preset;
 }
 import tailwindcss from "@tailwindcss/vite";
+import { VitePWA } from "vite-plugin-pwa";
 import path from "path";
 
 const BACKEND = process.env.HERMES_DASHBOARD_URL ?? "http://127.0.0.1:9119";
@@ -74,6 +75,17 @@ export default defineConfig({
     babel({ presets: [compilerPreset()] }),
     tailwindcss(),
     hermesDevToken(),
+    VitePWA({
+      // Static web-app manifest is authored in public/manifest.json and
+      // served from /manifest.json; the plugin owns the precaching
+      // service-worker only (no manifest generation to keep a verifiable
+      // static file).
+      manifest: false,
+      workbox: {
+        globPatterns: ["**/*.{js,css,html,woff2,png,ico}"],
+        navigateFallback: "/",
+      },
+    }),
   ],
   resolve: {
     alias: {
