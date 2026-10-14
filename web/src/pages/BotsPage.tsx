@@ -44,6 +44,7 @@ import { cn, timeAgo } from "@/lib/utils";
 import { ModelPickerDialog } from "@/components/ModelPickerDialog";
 import { useI18n } from "@/i18n";
 import { usePageHeader } from "@/contexts/usePageHeader";
+import { useProfileScope } from "@/contexts/useProfileScope";
 
 /* ------------------------------------------------------------------ */
 /* Types + helpers                                                     */
@@ -55,11 +56,14 @@ interface BotRow extends BotRosterEntry {
   last_active: number | null;
 }
 
-/** "Working" = the bot wrote in the last ~90 seconds (roster row, criterion 1). */
+/** "Working" = the bot wrote in the last ~90 seconds (roster row, criterion 1).
+ *
+ * A brand-new Bot Chat session is stamped with its creation time, so the
+ * preview is part of the contract: an empty session is not "working". */
 const WORKING_WINDOW_S = 90;
 
-function isWorking(lastActive: number | null): boolean {
-  if (lastActive === null) return false;
+function isWorking(lastActive: number | null, preview: string | null): boolean {
+  if (lastActive === null || !preview) return false;
   return Date.now() / 1000 - lastActive < WORKING_WINDOW_S;
 }
 
@@ -280,7 +284,7 @@ function RosterRow({
 }) {
   const { t } = useI18n();
   const title = bot.title || bot.name;
-  const working = isWorking(bot.last_active);
+  const working = isWorking(bot.last_active, bot.preview);
 
   return (
     <div className="flex items-stretch gap-1">
@@ -407,6 +411,7 @@ function RoutinesSection({ profileName }: { profileName: string }) {
                 <div className="flex shrink-0 items-center gap-1">
                   {paused && <Badge tone="warning">{t.bots.paused}</Badge>}
                   <Button
+                    type="button"
                     outlined
                     size="sm"
                     disabled={busy}
@@ -418,6 +423,7 @@ function RoutinesSection({ profileName }: { profileName: string }) {
                     {paused ? <Play className="h-3.5 w-3.5" /> : <Pause className="h-3.5 w-3.5" />}
                   </Button>
                   <Button
+                    type="button"
                     size="sm"
                     disabled={busy}
                     onClick={() => void act(job, "trigger")}
@@ -767,6 +773,7 @@ function BotDetailSheet({
 export function BotsPage() {
   const { t } = useI18n();
   const { setEnd } = usePageHeader();
+  const { setProfile } = useProfileScope();
   const navigate = useNavigate();
   const { toast, showToast } = useToast();
   const [rows, setRows] = useState<BotRow[]>([]);
@@ -841,13 +848,19 @@ export function BotsPage() {
     return () => setEnd(null);
   }, [headerEnd, setEnd]);
 
-  /** Hand the bot's canonical Bot Chat session to the embedded TUI (criterion 2). */
+  /** Hand the bot's canonical Bot Chat session to the embedded TUI (criterion 2).
+   *
+   * The management profile has to be switched too: ProfileProvider treats the
+   * URL as a projection of its state, so a bare `?profile=` would be rewritten
+   * back to the previous profile on the next effect pass — and the PTY would
+   * spawn under the wrong HERMES_HOME. */
   const openChat = (bot: BotRow) => {
     const sessionId = bot.bot_chat_session_id;
     if (!sessionId) {
       showToast(t.bots.chatUnavailable, "error");
       return;
     }
+    setProfile(bot.name);
     navigate(
       `/chat?resume=${encodeURIComponent(sessionId)}&profile=${encodeURIComponent(bot.name)}`,
     );

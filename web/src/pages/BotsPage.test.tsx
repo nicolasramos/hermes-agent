@@ -356,5 +356,14 @@ describe("Bot detail", () => {
     await waitFor(() => apiMocks.resumeCronJob.mock.calls.length > 0);
 
     expect(apiMocks.resumeCronJob).toHaveBeenCalledWith("job-1", "alpha");
+
+    // Routine controls live inside the detail <form>. A bare <button> there
+    // defaults to type="submit", which silently saves and closes the sheet:
+    // the sheet must still be open and nothing may have been written.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    expect(byTestId("bot-detail")).toBeTruthy();
+    expect(apiMocks.updateProfileDescription).not.toHaveBeenCalled();
   });
 });
