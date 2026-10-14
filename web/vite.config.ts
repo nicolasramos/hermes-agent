@@ -83,7 +83,7 @@ export default defineConfig({
       manifest: false,
       workbox: {
         globPatterns: ["**/*.{js,css,html,woff2,png,ico}"],
-        navigateFallback: "/",
+        navigateFallback: "index.html",
       },
     }),
   ],
