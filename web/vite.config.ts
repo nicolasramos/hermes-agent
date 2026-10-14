@@ -88,14 +88,16 @@ export default defineConfig({
         // navigations.  Navigations go to the network where the server
         // injects the token; when the network fails, offline.html serves.
         globIgnores: ["**/index.html"],
-      },
+        // Neutralise the plugin default (navigateFallback: "index.html")
+        // so workbox does not register a NavigationRoute that throws
+        // non-precached-url when index.html is not in the manifest.
+        navigateFallback: undefined,
       runtimeCaching: [
         {
-          // Register a NetworkFirst handler for navigations *before* the
-          // default NavigationRoute (runtimeCaching entries are processed
-          // in reverse order, so this one wins over navigateFallback if
-          // it were present).  No navigateFallback at all — let the
-          // runtimeCaching handle everything.
+          // NetworkFirst handler for navigations: sends them to the
+          // network where the server injects __HERMES_SESSION_TOKEN__.
+          // Without navigateFallback there is no automatic NavigationRoute;
+          // this is the only handler for request.mode === "navigate".
           urlPattern: ({ request }) => request.mode === "navigate",
           handler: "NetworkFirst",
           options: {
