@@ -1336,6 +1336,37 @@ export const api = {
     fetchJSON<SkillHubScan>(
       `/api/skills/hub/scan?identifier=${encodeURIComponent(identifier)}`,
     ),
+
+  // ── Bots surface helpers ───────────────────────────────────────────
+  // Bot profiles are regular profiles carrying ``ui_meta['hermes-bots']``.
+
+  /** Get the Bot Chat session id for a profile (canonical ``"Bot Chat"`` session). */
+  getBotChatSessionId: (profileName: string) =>
+    fetchJSON<{ session_id: string }>(
+      `/api/bots/${encodeURIComponent(profileName)}/bot-chat-session`,
+    ),
+
+  /** Submit a chat message to a bot's Bot Chat session. */
+  submitBotChatMessage: (profileName: string, message: string) =>
+    fetchJSON<{ ok: boolean; session_id?: string }>(
+      `/api/bots/${encodeURIComponent(profileName)}/chat`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message }),
+      },
+    ),
+
+  /** Mark a profile as Bot-Mode managed (writes ``ui_meta['hermes-bots']``). */
+  enableBotMode: (profileName: string) =>
+    fetchJSON<{ ok: boolean }>(
+      `/api/bots/${encodeURIComponent(profileName)}/enable`,
+      { method: "POST" },
+    ),
+
+  /** Get routine (cron) jobs scoped to a bot profile. */
+  getBotRoutines: (profileName: string) =>
+    fetchJSON<CronJob[]>(`/api/cron/jobs?profile=${encodeURIComponent(profileName)}`),
 };
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
