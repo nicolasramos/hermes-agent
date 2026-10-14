@@ -87,9 +87,30 @@ export default defineConfig({
         // build shell (which lacks __HERMES_SESSION_TOKEN__) for
         // navigations.  Navigations go to the network where the server
         // injects the token; when the network fails, offline.html serves.
-        exclude: ["index.html"],
-        navigateFallback: "offline.html",
+        globIgnores: ["**/index.html"],
       },
+      runtimeCaching: [
+        {
+          // Register a NetworkFirst handler for navigations *before* the
+          // default NavigationRoute (runtimeCaching entries are processed
+          // in reverse order, so this one wins over navigateFallback if
+          // it were present).  No navigateFallback at all — let the
+          // runtimeCaching handle everything.
+          urlPattern: ({ request }) => request.mode === "navigate",
+          handler: "NetworkFirst",
+          options: {
+            networkTimeoutSeconds: 3,
+            cacheName: "navigation-cache",
+            expiration: {
+              maxEntries: 10,
+              maxAgeSeconds: 60 * 60 * 24, // 1 day
+            },
+            cacheableResponse: {
+              statuses: [0, 200],
+            },
+          },
+        },
+      ],
     }),
   ],
   resolve: {
