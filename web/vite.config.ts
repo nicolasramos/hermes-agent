@@ -83,7 +83,12 @@ export default defineConfig({
       manifest: false,
       workbox: {
         globPatterns: ["**/*.{js,css,html,woff2,png,ico}"],
-        navigateFallback: "/",
+        // Exclude index.html from precache so the SW does not serve the
+        // build shell (which lacks __HERMES_SESSION_TOKEN__) for
+        // navigations.  Navigations go to the network where the server
+        // injects the token; when the network fails, offline.html serves.
+        exclude: ["index.html"],
+        navigateFallback: "offline.html",
       },
     }),
   ],
