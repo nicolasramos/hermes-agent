@@ -182,7 +182,7 @@ def _bot_payload(name: str, profile_dir: Path, *, with_session: bool = False) ->
         entry["description"] = str(meta.get("description") or entry["description"] or "")
         entry["model"] = str(meta.get("model") or "")
         entry["provider"] = str(meta.get("provider") or "")
-    if with_session:
+    if with_session and meta is not None:
         entry["bot_chat_session_id"] = _ensure_bot_chat_session(name, profile_dir)
     return entry
 
