@@ -1337,37 +1337,76 @@ export const api = {
       `/api/skills/hub/scan?identifier=${encodeURIComponent(identifier)}`,
     ),
 
-  // ── Bots surface helpers ───────────────────────────────────────────
-  // Bot profiles are regular profiles carrying ``ui_meta['hermes-bots']``.
+  // ── Bot Mode surface (hermes_cli/web_routers/bots.py, E1) ──────────
+  // A bot is a regular profile carrying ``ui_meta['hermes-bots']``. The
+  // roster endpoint returns EVERY profile of the machine (same set as
+  // ``hermes profile list``) plus the canonical ``Bot Chat`` session id.
+  // Chat itself is not an endpoint: the page hands the session to the
+  // embedded TUI (``/chat?resume=<id>``), see web/AGENTS.md.
 
-  /** Get the Bot Chat session id for a profile (canonical ``"Bot Chat"`` session). */
-  getBotChatSessionId: (profileName: string) =>
-    fetchJSON<{ session_id: string }>(
-      `/api/bots/${encodeURIComponent(profileName)}/bot-chat-session`,
-    ),
+  /** Roster: every profile of the machine with its Bot Mode metadata. */
+  listBots: () => fetchJSON<{ bots: BotRosterEntry[] }>("/api/bots"),
 
-  /** Submit a chat message to a bot's Bot Chat session. */
-  submitBotChatMessage: (profileName: string, message: string) =>
-    fetchJSON<{ ok: boolean; session_id?: string }>(
-      `/api/bots/${encodeURIComponent(profileName)}/chat`,
+  /** One bot's metadata (no session id — use the roster entry for that). */
+  getBot: (name: string) =>
+    fetchJSON<BotRosterEntry>(`/api/bots/${encodeURIComponent(name)}`),
+
+  /** Create a bot: profile + ui_meta + canonical Bot Chat session. */
+  createBot: (body: {
+    name: string;
+    title?: string;
+    description?: string;
+    model?: string;
+    provider?: string;
+  }) =>
+    fetchJSON<{
+      ok: boolean;
+      name: string;
+      path: string;
+      title: string;
+      bot_chat_session_id: string;
+    }>("/api/bots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
+  /** Edit a Bot Mode bot's title / role / model / provider (profile.yaml). */
+  updateBot: (
+    name: string,
+    body: {
+      title?: string;
+      description?: string;
+      model?: string;
+      provider?: string;
+    },
+  ) =>
+    fetchJSON<{ ok: boolean; name: string; bot: BotRosterEntry }>(
+      `/api/bots/${encodeURIComponent(name)}`,
       {
-        method: "POST",
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message }),
+        body: JSON.stringify(body),
       },
     ),
-
-  /** Mark a profile as Bot-Mode managed (writes ``ui_meta['hermes-bots']``). */
-  enableBotMode: (profileName: string) =>
-    fetchJSON<{ ok: boolean }>(
-      `/api/bots/${encodeURIComponent(profileName)}/enable`,
-      { method: "POST" },
-    ),
-
-  /** Get routine (cron) jobs scoped to a bot profile. */
-  getBotRoutines: (profileName: string) =>
-    fetchJSON<CronJob[]>(`/api/cron/jobs?profile=${encodeURIComponent(profileName)}`),
 };
+
+/** One entry of the Bot Mode roster (``GET /api/bots``).
+ *
+ * ``title``/``description``/``model``/``provider`` come from the profile's
+ * ``ui_meta['hermes-bots']`` block when the profile is Bot-Mode managed,
+ * falling back to the profile itself. ``bot_chat_session_id`` is only present
+ * on the roster payload (``GET /api/bots``), never on the detail payload.
+ */
+export interface BotRosterEntry {
+  name: string;
+  bot_managed: boolean;
+  title: string | null;
+  description: string;
+  model: string;
+  provider: string;
+  bot_chat_session_id?: string | null;
+}
 
 /** Identity payload returned by ``GET /api/auth/me`` (Phase 7).
  *
