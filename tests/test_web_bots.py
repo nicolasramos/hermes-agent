@@ -7,7 +7,9 @@ Covers the acceptance criteria of NRA-4435:
      ``ui_meta['hermes-bots']`` inside ``profile.yaml``, and a session whose title
      is exactly ``Bot Chat`` (read back from the profile's own session store);
   3. repeating the creation with the same name fails without side effects;
-  4. the roster test is not vacuous (it fails when the ui_meta write is skipped).
+  4. the roster test is not vacuous (it fails when the ui_meta write is skipped);
+  5. walking the roster leaves an unmarked profile's directory untouched (it must
+     not create ``state.db`` nor its lock files, nor announce a Bot Chat).
 
 ``tests/conftest.py`` already points ``HERMES_HOME`` at a per-test tmpdir, so these
 tests create real profiles and real session rows there.
@@ -192,4 +194,46 @@ def test_roster_is_not_vacuous(monkeypatch):
     assert entry["bot_managed"] is False, (
         "without the ui_meta write the profile must NOT be reported as a bot — "
         "otherwise the roster assertions above are vacuous"
+    )
+
+
+# ── 5. the roster is a read ────────────────────────────────────────────────
+
+
+def _profile_dir_entries(name: str):
+    """Every entry of the profile's own directory, sorted — dot files included."""
+    return sorted(entry.name for entry in Path(profiles_mod.get_profile_dir(name)).iterdir())
+
+
+def test_roster_never_writes_into_an_unmarked_profile():
+    """Walking the roster must not open — let alone populate — a plain profile's store.
+
+    Regression for the measured defect: the roster built the canonical Bot Chat of
+    *every* profile, so simply listing the bots created ``state.db`` (with its
+    ``*.lock`` files) and a ``Bot Chat`` session inside profiles that do not carry
+    ``ui_meta['hermes-bots']``. The walk is a read; an unmarked profile's directory
+    must be exactly what it was.
+
+    The second half pins the guard's shape: it must skip only *unmarked* profiles,
+    so the very same walk still hands the marked bot its Bot Chat session.
+    """
+    _make_profile("plain-user")
+    _mark_bot(_make_profile("marked-bot"), "Marked Bot")
+
+    before = _profile_dir_entries("plain-user")
+    roster = _call(bots.list_bots())
+
+    created = sorted(set(_profile_dir_entries("plain-user")) - set(before))
+    assert not created, f"read-only roster walk wrote into an unmarked profile: {created}"
+
+    plain = _entry(roster, "plain-user")
+    assert plain["bot_managed"] is False
+    assert "bot_chat_session_id" not in plain, (
+        "an unmarked profile must not announce a Bot Chat session"
+    )
+
+    marked = _entry(roster, "marked-bot")
+    assert marked["bot_chat_session_id"], (
+        "the guard must skip unmarked profiles only — a marked bot still gets its "
+        "canonical Bot Chat from the same walk"
     )
