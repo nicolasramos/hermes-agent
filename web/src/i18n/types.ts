@@ -18,6 +18,58 @@ export type Locale =
   | "ar";
 
 export interface Translations {
+  // ── Bots surface (Bot Mode roster / detail / routines) ──
+  bots: {
+    pageTitle: string;
+    emptyRosterTitle: string;
+    emptyRosterDesc: string;
+    createFirstBot: string;
+    createBotTitle: string;
+    createBot: string;
+    createFailed: string;
+    created: string;
+    profileName: string;
+    nameHint: string;
+    profileDescription: string;
+    descriptionPlaceholder: string;
+    working: string;
+    noRole: string;
+    noMessages: string;
+    openChat: string;
+    details: string;
+    chatUnavailable: string;
+    searchPlaceholder: string;
+    noResults: string;
+    loadFailed: string;
+    title: string;
+    role: string;
+    rolePlaceholder: string;
+    model: string;
+    noModel: string;
+    changeModel: string;
+    saved: string;
+    saveBot: string;
+    saveFailed: string;
+    skills: string;
+    skillsHint: string;
+    noSkills: string;
+    mcpServers: string;
+    mcpHint: string;
+    manageMcp: string;
+    routines: string;
+    routinesFailed: string;
+    noRoutines: string;
+    scheduleManual: string;
+    paused: string;
+    pause: string;
+    resume: string;
+    triggerNow: string;
+    jobTriggered: string;
+    jobPaused: string;
+    jobResumed: string;
+    jobFailed: string;
+  };
+
   // ── Common ──
   common: {
     save: string;
@@ -89,6 +141,7 @@ export interface Translations {
     };
     nav: {
       analytics: string;
+      bots: string;
       chat: string;
       config: string;
       cron: string;

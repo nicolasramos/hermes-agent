@@ -23,6 +23,7 @@ import {
 import {
   Activity,
   BarChart3,
+  Bot,
   BookOpen,
   Clock,
   Code,
@@ -87,6 +88,7 @@ const AnalyticsPage = lazy(() => import("@/pages/AnalyticsPage"));
 const ModelsPage = lazy(() => import("@/pages/ModelsPage"));
 const CronPage = lazy(() => import("@/pages/CronPage"));
 const ProfilesPage = lazy(() => import("@/pages/ProfilesPage"));
+const BotsPage = lazy(() => import("@/pages/BotsPage"));
 const ProfileBuilderPage = lazy(() => import("@/pages/ProfileBuilderPage"));
 const SkillsPage = lazy(() => import("@/pages/SkillsPage"));
 const PluginsPage = lazy(() => import("@/pages/PluginsPage"));
@@ -169,6 +171,7 @@ const BUILTIN_ROUTES_CORE: Record<string, ComponentType> = {
   "/webhooks": WebhooksPage,
   "/system": SystemPage,
   "/profiles": ProfilesPage,
+  "/bots": BotsPage,
   "/profiles/new": ProfileBuilderPage,
   "/config": ConfigPage,
   "/env": EnvPage,
@@ -212,6 +215,12 @@ const BUILTIN_NAV_REST: NavItem[] = [
   { path: "/webhooks", label: "Webhooks", icon: Webhook },
   { path: "/pairing", label: "Pairing", icon: ShieldCheck },
   { path: "/profiles", labelKey: "profiles", label: "Profiles", icon: Users },
+  {
+    path: "/bots",
+    labelKey: "bots",
+    label: "Bots",
+    icon: Bot,
+  },
   { path: "/config", labelKey: "config", label: "Config", icon: Settings },
   { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },
   { path: "/system", label: "System", icon: Wrench },
