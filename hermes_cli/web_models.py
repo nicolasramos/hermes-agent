@@ -506,3 +506,20 @@ class _PluginProvidersPutBody(BaseModel):
 class _PluginVisibilityBody(BaseModel):
     hidden: bool
 
+
+class BotCreate(BaseModel):
+    """POST /api/bots — create a new bot profile."""
+    name: str
+    title: Optional[str] = None
+    description: str = ""
+    model: Optional[str] = None
+    provider: Optional[str] = None
+
+
+class BotUpdate(BaseModel):
+    """PUT /api/bots/{name} — update an existing bot."""
+    title: Optional[str] = None
+    description: Optional[str] = None
+    model: Optional[str] = None
+    provider: Optional[str] = None
+
