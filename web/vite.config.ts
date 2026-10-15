@@ -83,7 +83,52 @@ export default defineConfig({
       manifest: false,
       workbox: {
         globPatterns: ["**/*.{js,css,html,woff2,png,ico}"],
-        navigateFallback: "/",
+        // The built shell must never be served for a navigation: the dashboard
+        // server injects __HERMES_SESSION_TOKEN__ into index.html on every real
+        // navigation (`Cache-Control: no-store`), and a precached shell carries
+        // no token, so serving it leaves every /api/* call at 401. Keep
+        // index.html out of the precache and let navigations reach the network.
+        globIgnores: ["**/index.html"],
+        // vite-plugin-pwa injects `navigateFallback: "index.html"` in its own
+        // defaults when the option is absent. workbox resolves that fallback
+        // eagerly through createHandlerBoundToURL(), which throws
+        // `non-precached-url` for a URL that is not in the manifest — and the
+        // throw kills the whole service-worker script. Explicit undefined is
+        // what neutralises the default; omitting the key is not enough.
+        navigateFallback: undefined,
+        runtimeCaching: [
+          {
+            // The only document handler: network first, which is where the
+            // server injects the token. When the network fails (or times out)
+            // and nothing is cached, PrecacheFallbackPlugin's handlerDidError
+            // serves the precached static offline page — never a token-less
+            // shell, and never the browser's own error page.
+            urlPattern: ({ request }) => request.mode === "navigate",
+            handler: "NetworkFirst",
+            options: {
+              networkTimeoutSeconds: 3,
+              cacheName: "navigation-cache",
+              expiration: {
+                maxEntries: 10,
+                maxAgeSeconds: 60 * 60 * 24, // 1 day
+              },
+              // workbox's default for this plugin is statuses: [0] (opaque
+              // responses only). Pinning that default states the intent: the
+              // authenticated document is NEVER persisted. Caching 200s here
+              // would put a document carrying __HERMES_SESSION_TOKEN__ in Cache
+              // Storage for a day (the server's Cache-Control: no-store is not
+              // consulted — the plugin decides on status alone), and an offline
+              // repeat navigation would then be answered with that stale shell
+              // instead of the offline page.
+              cacheableResponse: {
+                statuses: [0],
+              },
+              precacheFallback: {
+                fallbackURL: "offline.html",
+              },
+            },
+          },
+        ],
       },
     }),
   ],
