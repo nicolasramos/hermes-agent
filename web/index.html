@@ -2,15 +2,43 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.ico" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
     />
+    <!-- PWA: web-app manifest -->
+    <link rel="manifest" href="/manifest.json" />
+    <!-- PWA: iOS "Add to Home Screen" (standalone app behavior) -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Hermes" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>Hermes Agent - Dashboard</title>
   </head>
   <body>
     <div id="root"></div>
+    <!-- PWA offline notice: shown from the cached shell when the network is
+         down.  Lives in static HTML so it survives even if the SPA cannot
+         reach /api — it refreshes automatically when the network returns. -->
+    <div
+      id="pwa-offline-banner"
+      hidden
+      style="position:fixed;bottom:0;left:0;right:0;background:#7c3aed;color:#fff;text-align:center;padding:.6rem;font-size:.9rem;z-index:9999;font-weight:500;"
+    >
+      Sin conexión — viendo la versión en caché. Se actualizará automáticamente cuando la red vuelva.
+    </div>
+    <script>
+      (function () {
+        var banner = document.getElementById("pwa-offline-banner");
+        function update() {
+          banner.hidden = navigator.onLine;
+        }
+        addEventListener("online", update);
+        addEventListener("offline", update);
+        update();
+      })();
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
